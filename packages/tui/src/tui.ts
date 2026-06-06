@@ -50,6 +50,12 @@ export interface Component {
 	handleInput?(data: string): void;
 
 	/**
+	 * Optional handler for mouse click events when component has focus.
+	 * Coordinates are 0-indexed and component-relative.
+	 */
+	handleMouse?(event: { col: number; row: number }): void;
+
+	/**
 	 * If true, component receives key release events (Kitty protocol).
 	 * Default is false - release events are filtered out.
 	 */
@@ -270,6 +276,7 @@ export class TUI extends Container {
 	private previousHeight = 0;
 	private focusedComponent: Component | null = null;
 	private inputListeners = new Set<InputListener>();
+	private focusedComponentStartRow = -1;
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	public onDebug?: () => void;
@@ -598,6 +605,30 @@ export class TUI extends Container {
 		for (const overlay of this.overlayStack) overlay.component.invalidate?.();
 	}
 
+	render(width: number): string[] {
+		this.focusedComponentStartRow = -1;
+		const lines: string[] = [];
+		let offset = 0;
+		const findFocused = (component: Component): boolean => {
+			if (component === this.focusedComponent) return true;
+			if ("children" in component) {
+				for (const c of (component as Container).children) {
+					if (findFocused(c)) return true;
+				}
+			}
+			return false;
+		};
+		for (const child of this.children) {
+			const childLines = child.render(width);
+			if (this.focusedComponentStartRow === -1 && findFocused(child)) {
+				this.focusedComponentStartRow = offset;
+			}
+			lines.push(...childLines);
+			offset += childLines.length;
+		}
+		return lines;
+	}
+
 	start(): void {
 		this.stopped = false;
 		this.terminal.start(
@@ -723,6 +754,26 @@ export class TUI extends Container {
 		if (this.consumeCellSizeResponse(data)) {
 			return;
 		}
+		// Parse SGR mouse events (ESC[<B;X;YM/m)
+		const mouseMatch = data.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])$/);
+		if (mouseMatch) {
+			const button = Number.parseInt(mouseMatch[1], 10);
+			const col = Number.parseInt(mouseMatch[2], 10) - 1; // 0-indexed
+			const row = Number.parseInt(mouseMatch[3], 10) - 1; // 0-indexed
+			const isPress = mouseMatch[4] === "M";
+			// Handle left-click press only (button 0, no modifiers)
+			if (isPress && button === 0 && this.focusedComponent?.handleMouse && this.focusedComponentStartRow >= 0) {
+				const bufferRow = this.previousViewportTop + row;
+				const componentRow = bufferRow - this.focusedComponentStartRow;
+				if (componentRow >= 0) {
+					this.focusedComponent.handleMouse({ col, row: componentRow });
+					this.requestRender();
+				}
+			}
+			return;
+		}
+
+
 
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {

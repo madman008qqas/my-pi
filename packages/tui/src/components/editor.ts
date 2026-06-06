@@ -240,6 +240,8 @@ export class Editor implements Component, Focusable {
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
 
+	private maxVisibleLines: number = 5;
+
 	// Border color (can be changed dynamically)
 	public borderColor: (str: string) => string;
 
@@ -431,7 +433,8 @@ export class Editor implements Component, Focusable {
 
 		// Calculate max visible lines: 30% of terminal height, minimum 5 lines
 		const terminalRows = this.tui.terminal.rows;
-		const maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+		this.maxVisibleLines = Math.max(5, Math.floor(terminalRows * 0.3));
+		const maxVisibleLines = this.maxVisibleLines;
 
 		// Find the cursor line index in layoutLines
 		let cursorLineIndex = layoutLines.findIndex((line) => line.hasCursor);
@@ -535,6 +538,39 @@ export class Editor implements Component, Focusable {
 		}
 
 		return result;
+	}
+
+	handleMouse(event: { col: number; row: number }): void {
+		// Row 0 = top border, rows 1..N = content lines, row N+1 = bottom border
+		const contentRow = event.row - 1;
+		if (contentRow < 0 || contentRow >= this.maxVisibleLines) return;
+
+		const visualLineIndex = this.scrollOffset + contentRow;
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		if (visualLineIndex < 0 || visualLineIndex >= visualLines.length) return;
+
+		const visualLine = visualLines[visualLineIndex];
+
+		// Convert column: subtract padding
+		const contentCol = event.col - this.paddingX;
+		if (contentCol < 0) return;
+
+		// Find character offset within the visual line, handling wide characters
+		const line = this.state.lines[visualLine.logicalLine] || "";
+		const text = line.substring(visualLine.startCol);
+		let charIndex = 0;
+		let visualPos = 0;
+		for (const char of text) {
+			const charWidth = visibleWidth(char);
+			if (visualPos + charWidth > contentCol) break;
+			visualPos += charWidth;
+			charIndex++;
+		}
+
+		const targetCol = visualLine.startCol + charIndex;
+		this.state.cursorLine = visualLine.logicalLine;
+		this.setCursorCol(targetCol);
+		this.lastAction = null;
 	}
 
 	handleInput(data: string): void {

@@ -146,6 +146,9 @@ export class ProcessTerminal implements Terminal {
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		process.stdout.write("\x1b[?2004h");
 
+		// Enable SGR mouse mode for click-to-position cursor support
+		process.stdout.write("\x1b[?1002h\x1b[?1006h");
+
 		// Set up resize handler immediately
 		process.stdout.on("resize", this.resizeHandler);
 
@@ -408,6 +411,8 @@ export class ProcessTerminal implements Terminal {
 			setKittyProtocolActive(false);
 		}
 		this.keyboardProtocolNegotiationPending = false;
+		// Disable mouse mode to prevent sequences leaking to shell
+		process.stdout.write("\x1b[?1006l\x1b[?1002l");
 		if (this._modifyOtherKeysActive) {
 			process.stdout.write("\x1b[>4;0m");
 			this._modifyOtherKeysActive = false;
@@ -445,6 +450,9 @@ export class ProcessTerminal implements Terminal {
 
 		// Disable bracketed paste mode
 		process.stdout.write("\x1b[?2004l");
+
+		// Disable SGR mouse mode
+		process.stdout.write("\x1b[?1006l\x1b[?1002l");
 
 		const shouldDisableKittyProtocol =
 			this.keyboardProtocolPushed || this._kittyProtocolActive || this.keyboardProtocolNegotiationPending;
