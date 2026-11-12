@@ -292,6 +292,7 @@ export class TUI extends Container {
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
 	private stopped = false;
+	private mouseTrackingEnabled = true;
 
 	// Overlay stack for modal components rendered on top of base content
 	private focusOrderCounter = 0;
@@ -631,6 +632,7 @@ export class TUI extends Container {
 
 	start(): void {
 		this.stopped = false;
+		this.mouseTrackingEnabled = true;
 		this.terminal.start(
 			(data) => this.handleInput(data),
 			() => this.requestRender(),
@@ -761,6 +763,12 @@ export class TUI extends Container {
 			const col = Number.parseInt(mouseMatch[2], 10) - 1; // 0-indexed
 			const row = Number.parseInt(mouseMatch[3], 10) - 1; // 0-indexed
 			const isPress = mouseMatch[4] === "M";
+			// Scroll wheel - disable mouse tracking to allow terminal native scrollback
+			if (isPress && (button === 64 || button === 65) && this.mouseTrackingEnabled) {
+				this.terminal.write("\x1b[?1006l\x1b[?1002l");
+				this.mouseTrackingEnabled = false;
+				return;
+			}
 			// Handle left-click press only (button 0, no modifiers)
 			if (isPress && button === 0 && this.focusedComponent?.handleMouse && this.focusedComponentStartRow >= 0) {
 				const bufferRow = this.previousViewportTop + row;
@@ -773,7 +781,11 @@ export class TUI extends Container {
 			return;
 		}
 
-
+		// Re-enable mouse tracking after user scrolled (any key exits terminal scrollback)
+		if (!this.mouseTrackingEnabled) {
+			this.terminal.write("\x1b[?1002h\x1b[?1006h");
+			this.mouseTrackingEnabled = true;
+		}
 
 		// Global debug key handler (Shift+Ctrl+D)
 		if (matchesKey(data, "shift+ctrl+d") && this.onDebug) {

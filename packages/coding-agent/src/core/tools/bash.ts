@@ -172,14 +172,9 @@ class BashResultRenderComponent extends Container {
 	};
 }
 
-function formatDuration(ms: number): string {
-	return `${(ms / 1000).toFixed(1)}s`;
-}
-
 function formatBashCall(args: { command?: string; timeout?: number } | undefined): string {
 	const command = str(args?.command);
-	const timeout = args?.timeout as number | undefined;
-	const timeoutSuffix = timeout ? theme.fg("muted", ` (timeout ${timeout}s)`) : "";
+	const timeoutSuffix = "";
 	const commandDisplay = command === null ? invalidArgText(theme) : command ? command : theme.fg("toolOutput", "...");
 	return theme.fg("toolTitle", theme.bold(`$ ${commandDisplay}`)) + timeoutSuffix;
 }
@@ -192,8 +187,8 @@ function rebuildBashResultRenderComponent(
 	},
 	options: ToolRenderResultOptions,
 	showImages: boolean,
-	startedAt: number | undefined,
-	endedAt: number | undefined,
+	_startedAt: number | undefined,
+	_endedAt: number | undefined,
 ): void {
 	const state = component.state;
 	component.clear();
@@ -257,12 +252,6 @@ function rebuildBashResultRenderComponent(
 			}
 		}
 		component.addChild(new Text(`\n${theme.fg("warning", `[${warnings.join(". ")}]`)}`, 0, 0));
-	}
-
-	if (startedAt !== undefined) {
-		const label = options.isPartial ? "Elapsed" : "Took";
-		const endTime = endedAt ?? Date.now();
-		component.addChild(new Text(`\n${theme.fg("muted", `${label} ${formatDuration(endTime - startedAt)}`)}`, 0, 0));
 	}
 }
 
