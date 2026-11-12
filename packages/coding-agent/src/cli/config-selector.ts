@@ -2,26 +2,34 @@
  * TUI config selector for `pi config` command
  */
 
-import { ProcessTerminal, TUI } from "@earendil-works/pi-tui";
-import type { ResolvedPaths } from "../core/package-manager.ts";
+import { ProcessTerminal, setKeybindings, type TUI, TuiMainScreen } from "@earendil-works/pi-tui";
+import { KeybindingsManager } from "../core/keybindings.ts";
 import type { SettingsManager } from "../core/settings-manager.ts";
-import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.ts";
+import { ConfigSelectorComponent, type ScopedResolvedPaths } from "../modes/interactive/components/config-selector.ts";
 import { initTheme, stopThemeWatcher } from "../modes/interactive/theme/theme.ts";
 
 export interface ConfigSelectorOptions {
-	resolvedPaths: ResolvedPaths;
+	resolvedPaths: ScopedResolvedPaths;
 	settingsManager: SettingsManager;
 	cwd: string;
 	agentDir: string;
+	writeScope: "global" | "project";
+	projectModeAvailable: boolean;
 }
 
 /** Show TUI config selector and return when closed */
 export async function selectConfig(options: ConfigSelectorOptions): Promise<void> {
 	// Initialize theme before showing TUI
 	initTheme(options.settingsManager.getTheme(), true);
+	setKeybindings(KeybindingsManager.create(options.agentDir));
 
 	return new Promise((resolve) => {
-		const ui = new TUI(new ProcessTerminal());
+		const ui: TUI = new TuiMainScreen(
+			new ProcessTerminal(),
+			options.settingsManager.getShowHardwareCursor(),
+			options.agentDir,
+		);
+		ui.setClearOnShrink(options.settingsManager.getClearOnShrink());
 		let resolved = false;
 
 		const selector = new ConfigSelectorComponent(
@@ -44,6 +52,8 @@ export async function selectConfig(options: ConfigSelectorOptions): Promise<void
 			},
 			() => ui.requestRender(),
 			ui.terminal.rows,
+			options.writeScope,
+			options.projectModeAvailable,
 		);
 
 		ui.addChild(selector);

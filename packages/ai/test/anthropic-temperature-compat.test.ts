@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { getModel } from "../src/models.ts";
-import { streamSimple } from "../src/stream.ts";
+import { getModel, streamSimple } from "../src/compat.ts";
 import type { Context, Model, SimpleStreamOptions } from "../src/types.ts";
 
 interface AnthropicTemperaturePayload {
@@ -80,6 +79,12 @@ describe("Anthropic temperature compatibility", () => {
 
 	it("omits default temperature for Claude Opus 4.7", async () => {
 		const payload = await capturePayload(getModel("anthropic", "claude-opus-4-7"), { temperature: 1 });
+
+		expect(payload.temperature).toBeUndefined();
+	});
+
+	it("omits temperature for Claude Sonnet 5", async () => {
+		const payload = await capturePayload(getModel("anthropic", "claude-sonnet-5"), { temperature: 0 });
 
 		expect(payload.temperature).toBeUndefined();
 	});

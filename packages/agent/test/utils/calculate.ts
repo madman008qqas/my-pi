@@ -1,4 +1,5 @@
-import { type Static, Type } from "typebox";
+import type { Usage } from "@earendil-works/pi-ai";
+import { obj, type Static, str } from "@earendil-works/pi-schema";
 import type { AgentTool, AgentToolResult } from "../../src/types.ts";
 
 export interface CalculateResult extends AgentToolResult<undefined> {
@@ -15,9 +16,11 @@ export function calculate(expression: string): CalculateResult {
 	}
 }
 
-const calculateSchema = Type.Object({
-	expression: Type.String({ description: "The mathematical expression to evaluate" }),
-});
+const calculateSchema = obj(
+	{ expression: str({ description: "The mathematical expression to evaluate" }) },
+	// Open, as the tool accepted extra arguments before it moved from TypeBox.
+	{ open: true },
+);
 
 type CalculateParams = Static<typeof calculateSchema>;
 
@@ -30,3 +33,10 @@ export const calculateTool: AgentTool<typeof calculateSchema, undefined> = {
 		return calculate(args.expression);
 	},
 };
+
+export function createCalculateToolWithUsage(usage: Usage): AgentTool<typeof calculateSchema, undefined> {
+	return {
+		...calculateTool,
+		execute: async (_toolCallId: string, args: CalculateParams) => ({ ...calculate(args.expression), usage }),
+	};
+}

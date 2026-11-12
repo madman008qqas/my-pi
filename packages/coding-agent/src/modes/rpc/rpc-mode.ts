@@ -27,6 +27,7 @@ import {
 } from "../../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
+import { toJsonEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
@@ -81,10 +82,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		{ resolve: (value: any) => void; reject: (error: Error) => void }
 	>();
 
-	// Shutdown request flag
+	// Extension shutdown requests (ctx.shutdown()) wait until input is attached, no command is
+	// being handled, and the session is idle. See checkShutdownRequested().
 	let shutdownRequested = false;
 	let shuttingDown = false;
-	const signalCleanupHandlers: Array<() => void> = [];
+	let inputReady = false;
+	let activeCommands = 0;
+	// SIGTERM/SIGHUP received so far. Only a repeated signal forces exit during shutdown.
+	let signalCount = 0;
 
 	/** Helper for dialog methods with signal/timeout support */
 	function createDialogPromise<T>(
@@ -319,7 +324,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			uiContext: createExtensionUIContext(),
 			mode: "rpc",
 			commandContextActions: {
-				waitForIdle: () => session.agent.waitForIdle(),
+				waitForIdle: () => session.waitForIdle(),
 				newSession: async (options) => runtimeHost.newSession(options),
 				fork: async (entryId, forkOptions) => {
 					const result = await runtimeHost.fork(entryId, forkOptions);
@@ -343,6 +348,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			},
 			shutdownHandler: () => {
 				shutdownRequested = true;
+				// An idle session has no command response or agent_settled left to check the flag.
+				// Check on the next tick so the requesting handler finishes first.
+				setImmediate(checkShutdownRequested);
 			},
 			onError: (err) => {
 				output({ type: "extension_error", extensionPath: err.extensionPath, event: err.event, error: err.error });
@@ -352,7 +360,10 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			output(event);
+			output(toJsonEvent(event));
+			if (event.type === "agent_settled") {
+				checkShutdownRequested();
+			}
 		});
 		unsubscribeBackpressure = session.agent.subscribe(async () => {
 			await waitForRawStdoutBackpressure();
@@ -366,12 +377,20 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		for (const signal of signals) {
-			const handler = () => {
+			const exitCode = signal === "SIGHUP" ? 129 : 143;
+			// Handlers stay registered until exit: without one, a signal during shutdown would kill
+			// the process before dispose() finishes (for example a pending MCP token refresh).
+			process.on(signal, () => {
+				signalCount++;
 				killTrackedDetachedChildren();
-				void shutdown(signal === "SIGHUP" ? 129 : 143, signal);
-			};
-			process.on(signal, handler);
-			signalCleanupHandlers.push(() => process.off(signal, handler));
+				if (!shuttingDown) {
+					void shutdown(exitCode, signal);
+				} else if (signalCount > 1) {
+					// Process managers often close stdin and send SIGTERM together, so one signal
+					// during shutdown is not a request to skip cleanup; a repeated one is.
+					process.exit(exitCode);
+				}
+			});
 		}
 	};
 
@@ -391,39 +410,47 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				// Start prompt handling immediately, but emit the authoritative response only after
 				// prompt preflight succeeds. Queued and immediately handled prompts also count as success.
 				let preflightSucceeded = false;
+				// Extension commands run inside prompt(); defer shutdown requests until it settles.
+				activeCommands++;
 				void session
 					.prompt(command.message, {
 						images: command.images,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",
-						preflightResult: (didSucceed) => {
-							if (didSucceed) {
-								preflightSucceeded = true;
-								output(success(id, "prompt"));
-							}
+						preflightResult: (disposition) => {
+							preflightSucceeded = true;
+							output(success(id, "prompt", { disposition }));
 						},
 					})
 					.catch((e) => {
 						if (!preflightSucceeded) {
 							output(error(id, "prompt", e.message));
 						}
+					})
+					.finally(() => {
+						activeCommands--;
+						checkShutdownRequested();
 					});
 				return undefined;
 			}
 
 			case "steer": {
-				await session.steer(command.message, command.images);
-				return success(id, "steer");
+				const disposition = await session.steer(command.message, command.images, { source: "rpc" });
+				return success(id, "steer", { disposition });
 			}
 
 			case "follow_up": {
-				await session.followUp(command.message, command.images);
-				return success(id, "follow_up");
+				const disposition = await session.followUp(command.message, command.images, { source: "rpc" });
+				return success(id, "follow_up", { disposition });
 			}
 
 			case "abort": {
 				await session.abort();
 				return success(id, "abort");
+			}
+
+			case "clear_queue": {
+				return success(id, "clear_queue", session.clearQueue());
 			}
 
 			case "new_session": {
@@ -462,7 +489,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "set_model": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = session.modelRuntime.getAvailableSnapshot();
 				const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
@@ -480,7 +507,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "get_available_models": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = session.modelRuntime.getAvailableSnapshot();
 				return success(id, "get_available_models", { models });
 			}
 
@@ -499,6 +526,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					return success(id, "cycle_thinking_level", null);
 				}
 				return success(id, "cycle_thinking_level", { level });
+			}
+
+			case "get_available_thinking_levels": {
+				const levels = session.getAvailableThinkingLevels();
+				return success(id, "get_available_thinking_levels", { levels });
 			}
 
 			// =================================================================
@@ -548,8 +580,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "bash": {
+				const eventResult = await session.extensionRunner.emitUserBash({
+					type: "user_bash",
+					command: command.command,
+					excludeFromContext: command.excludeFromContext ?? false,
+					cwd: session.sessionManager.getCwd(),
+				});
+
+				if (eventResult?.result) {
+					session.recordBashResult(command.command, eventResult.result, {
+						excludeFromContext: command.excludeFromContext,
+					});
+					return success(id, "bash", eventResult.result);
+				}
+
 				const result = await session.executeBash(command.command, undefined, {
 					excludeFromContext: command.excludeFromContext,
+					id,
+					operations: eventResult?.operations,
 				});
 				return success(id, "bash", result);
 			}
@@ -604,6 +652,24 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			case "get_fork_messages": {
 				const messages = session.getUserMessagesForForking();
 				return success(id, "get_fork_messages", { messages });
+			}
+
+			case "get_entries": {
+				const sessionManager = session.sessionManager;
+				let entries = sessionManager.getEntries();
+				if (command.since !== undefined) {
+					const sinceIndex = entries.findIndex((e) => e.id === command.since);
+					if (sinceIndex === -1) {
+						return error(id, "get_entries", `Entry not found: ${command.since}`);
+					}
+					entries = entries.slice(sinceIndex + 1);
+				}
+				return success(id, "get_entries", { entries, leafId: sessionManager.getLeafId() });
+			}
+
+			case "get_tree": {
+				const sessionManager = session.sessionManager;
+				return success(id, "get_tree", { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() });
 			}
 
 			case "get_last_assistant_text": {
@@ -667,25 +733,17 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 
 			default: {
 				const unknownCommand = command as { type: string };
-				return error(undefined, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
+				return error(id, unknownCommand.type, `Unknown command: ${unknownCommand.type}`);
 			}
 		}
 	};
 
-	/**
-	 * Check if shutdown was requested and perform shutdown if so.
-	 * Called after handling each command when waiting for the next command.
-	 */
 	let detachInput = () => {};
 
-	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<never> {
-		if (shuttingDown) {
-			process.exit(exitCode);
-		}
+	/** Dispose the runtime and exit. Runs once; later calls (stdin EOF after a signal) do nothing. */
+	async function shutdown(exitCode = 0, signal?: NodeJS.Signals): Promise<void> {
+		if (shuttingDown) return;
 		shuttingDown = true;
-		for (const cleanup of signalCleanupHandlers) {
-			cleanup();
-		}
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		await runtimeHost.dispose();
@@ -697,9 +755,14 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		process.exit(exitCode);
 	}
 
-	async function checkShutdownRequested(): Promise<void> {
-		if (!shutdownRequested) return;
-		await shutdown();
+	/**
+	 * Shut down if an extension requested it and nothing still needs the process: input is attached,
+	 * no command (including a prompt that has not settled) is being handled, and the session is idle.
+	 * Each of those ending calls this again.
+	 */
+	function checkShutdownRequested(): void {
+		if (!shutdownRequested || shuttingDown || !inputReady || activeCommands > 0 || !session.isIdle) return;
+		void shutdown();
 	}
 
 	const handleInputLine = async (line: string) => {
@@ -735,13 +798,19 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		}
 
 		const command = parsed as RpcCommand;
+		activeCommands++;
 		try {
-			const response = await handleCommand(command);
+			let response: RpcResponse | undefined;
+			try {
+				response = await handleCommand(command);
+			} finally {
+				activeCommands--;
+			}
 			if (response) {
 				output(response);
 				await waitForRawStdoutBackpressure();
 			}
-			await checkShutdownRequested();
+			checkShutdownRequested();
 		} catch (commandError: unknown) {
 			output(
 				error(
@@ -768,6 +837,9 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			process.stdin.off("end", onInputEnd);
 		};
 	})();
+	inputReady = true;
+	// Handle a shutdown requested during startup (e.g. from session_start).
+	checkShutdownRequested();
 
 	// Keep process alive forever
 	return new Promise(() => {});
